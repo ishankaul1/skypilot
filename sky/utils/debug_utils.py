@@ -1,5 +1,6 @@
 """Debug dump utilities for troubleshooting SkyPilot issues."""
 import collections
+import concurrent.futures
 import datetime
 import hashlib
 import json
@@ -690,6 +691,15 @@ def _populate_recent_context(debug_dump_context: DebugDumpContext,
                  f'from recent activity')
 
 
+# Wall-clock deadline for the sky_check.check() enabled-clouds probe in the
+# dump. check() probes every enabled context and a defunct one costs ~20s
+# (urllib3 retries); per dead context that stacks. check() is general-purpose
+# with no timeout knob, so we bound it here (dump-only) rather than altering
+# global check behavior. Generous enough for a healthy multi-cloud check, tight
+# enough that a couple of dead contexts can't dominate the dump.
+_SKY_CHECK_TIMEOUT = 30
+
+
 def _dump_server_info(dump_dir: str,
                       errors: Optional[List[Dict[str, str]]] = None) -> None:
     """Collect server metadata."""
@@ -748,9 +758,42 @@ def _dump_server_info(dump_dir: str,
 
     # Add cloud status (keyed by workspace name, each mapping cloud names
     # to a list of capability strings — already JSON-serializable).
+    #
+    # sky_check.check() probes every enabled context's credentials
+    # (list_namespaced_pod), and a defunct context costs ~20s there (urllib3
+    # retries). check() is general-purpose and has no timeout param, and we
+    # must NOT change its global behavior, so we bound it for the dump only:
+    # run it in a worker thread with a wall-clock deadline. On timeout we
+    # record a partial-result error and move on rather than hang the dump.
+    # (The worker may keep running briefly; check() is a read-only probe, so a
+    # lingering thread is harmless for this one-shot dump.)
+    #
+    # NOTE: we deliberately do NOT use the executor as a context manager -- its
+    # __exit__ calls shutdown(wait=True), which would re-block on the
+    # still-running worker and defeat the timeout. On timeout we shut it down
+    # with wait=False and let the orphaned worker finish in the background.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        server_info['enabled_clouds'] = sky_check.check(quiet=True)
+        future = executor.submit(sky_check.check, quiet=True)
+        server_info['enabled_clouds'] = future.result(
+            timeout=_SKY_CHECK_TIMEOUT)
+        executor.shutdown(wait=False)
+    except concurrent.futures.TimeoutError:
+        executor.shutdown(wait=False)
+        msg = (f'sky check timed out after {_SKY_CHECK_TIMEOUT}s (likely a '
+               f'defunct/unreachable cloud or kube context); skipping '
+               f'enabled_clouds in the dump.')
+        logger.warning(msg)
+        server_info['cloud_status_error'] = msg
+        if errors is not None:
+            errors.append({
+                'component': 'server_info',
+                'resource': 'cloud_status',
+                'error': msg,
+                'traceback': _full_traceback()
+            })
     except Exception as e:  # pylint: disable=broad-except
+        executor.shutdown(wait=False)
         server_info['cloud_status_error'] = str(e)
         if errors is not None:
             errors.append({

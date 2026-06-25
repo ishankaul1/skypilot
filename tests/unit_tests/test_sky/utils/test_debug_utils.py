@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import posixpath
+import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set
@@ -2161,6 +2162,60 @@ class TestSensitiveEnvVarRedaction:
         assert env['SKY_NORMAL_VAR'] == 'visible'
         # Sensitive var should be redacted to bool
         assert env['SKYPILOT_DB_CONNECTION_URI'] is True
+
+    @mock.patch('sky.utils.debug_utils.requests_lib.get_request',
+                return_value=None)
+    def test_dump_server_info_check_timeout_does_not_hang(
+            self, mock_req, tmp_path, monkeypatch):
+        """A slow sky_check.check() is bounded; the dump records a timeout error
+        and moves on instead of hanging (the ~20s-per-dead-context probe)."""
+        del mock_req  # required by mock.patch
+        # Tighten the deadline so the test is fast.
+        monkeypatch.setattr(debug_utils, '_SKY_CHECK_TIMEOUT', 0.2)
+        started = threading.Event()
+
+        def _slow_check(*_args, **_kwargs):
+            started.set()
+            time.sleep(5)  # Longer than the (patched) deadline.
+            return {}
+
+        errors: List[Dict[str, str]] = []
+        with mock.patch('sky.utils.debug_utils.sky_check.check',
+                        side_effect=_slow_check):
+            start = time.time()
+            debug_utils._dump_server_info(str(tmp_path), errors=errors)
+            elapsed = time.time() - start
+
+        assert started.is_set()
+        # Returned well before the slow check would have finished.
+        assert elapsed < 3
+        with open(os.path.join(str(tmp_path), 'server_info.json')) as f:
+            info = json.load(f)
+        assert 'enabled_clouds' not in info
+        assert 'cloud_status_error' in info
+        assert any(e['resource'] == 'cloud_status' for e in errors)
+
+    @mock.patch('sky.utils.debug_utils.requests_lib.get_request',
+                return_value=None)
+    @mock.patch('sky.utils.debug_utils.sky_check.check',
+                return_value={'default': {
+                    'kubernetes': ['compute']
+                }})
+    def test_dump_server_info_check_result_recorded(self, mock_check, mock_req,
+                                                    tmp_path):
+        """A fast check result is recorded as enabled_clouds (no timeout)."""
+        del mock_check, mock_req  # required by mock.patch
+        errors: List[Dict[str, str]] = []
+        debug_utils._dump_server_info(str(tmp_path), errors=errors)
+
+        with open(os.path.join(str(tmp_path), 'server_info.json')) as f:
+            info = json.load(f)
+        assert info['enabled_clouds'] == {
+            'default': {
+                'kubernetes': ['compute']
+            }
+        }
+        assert 'cloud_status_error' not in info
 
 
 # ---------------------------------------------------------------------------
