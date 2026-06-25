@@ -10,6 +10,7 @@ import platform
 import posixpath
 import re
 import shutil
+import threading
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict
@@ -1262,10 +1263,209 @@ def _dump_kube_contexts_info(dump_dir: str,
                 })
 
 
+class _ContextReachabilityCache:
+    """Thread-safe, memoized per-context kube reachability probes.
+
+    Multiple SkyPilot clusters can share one kube context, and the per-cluster
+    dump runs in parallel (see _dump_cluster_info), so without memoization N
+    clusters on one defunct context would each pay the ~API_TIMEOUT probe. We
+    cache the first probe's result per context under a lock so each context is
+    probed at most once per dump. ``None`` (in-cluster auth) is a valid key.
+
+    The probe itself is the bounded, no-retry signal #9937 added
+    (kubernetes_debug.context_reachable); see that function and
+    _resolve_remote_skylet_log_path for why kubectl's connect_timeout can't be
+    used here.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cache: Dict[Optional[str], bool] = {}
+
+    def is_reachable(self, context: Optional[str]) -> bool:
+        with self._lock:
+            if context in self._cache:
+                return self._cache[context]
+        # Probe outside the lock so a slow (timing-out) probe on one context
+        # doesn't block reachability lookups for other contexts. A duplicate
+        # concurrent probe of the same context is harmless and rare.
+        reachable = kubernetes_debug.context_reachable(context)
+        with self._lock:
+            self._cache.setdefault(context, reachable)
+            return self._cache[context]
+
+
+def _dump_one_cluster(
+        cluster_name: str, clusters_dir: str,
+        reachability: _ContextReachabilityCache) -> List[Dict[str, str]]:
+    """Dump one cluster's state, events, requests, skylet log and k8s objects.
+
+    Returns this cluster's error records. Runs as a worker under
+    run_in_parallel, so it owns a private ``errors`` list (no shared mutable
+    state across threads); the caller merges them after all workers finish.
+    Best-effort throughout: any failure is recorded, never raised, so one bad
+    cluster can't abort the others.
+    """
+    errors: List[Dict[str, str]] = []
+    cluster_dir = os.path.join(clusters_dir, cluster_name)
+    os.makedirs(cluster_dir, exist_ok=True)
+
+    # Get cluster info, history, and events. Cluster history and
+    # events outlive the cluster row, so terminated clusters still
+    # produce data here.
+    try:
+        dump_data = debug_dump_helpers.get_cluster_dump_data(cluster_name)
+        for filename, content in dump_data:
+            file_path = os.path.join(cluster_dir, filename)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(content, f, indent=2, default=str)
+        if dump_data:
+            logger.debug(f'Dumped cluster {cluster_name!r} '
+                         f'({len(dump_data)} files)')
+        else:
+            logger.debug(f'Cluster {cluster_name!r} not found in DB or '
+                         f'cluster history')
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(f'Failed to get info for cluster {cluster_name}: {e}')
+        errors.append({
+            'component': 'clusters',
+            'resource': cluster_name,
+            'error': str(e),
+            'traceback': _full_traceback()
+        })
+
+    # Copy the provision log if available. The path is recorded in
+    # cluster history, so this also works for terminated clusters.
+    try:
+        provision_log_path = (
+            global_user_state.get_cluster_history_provision_log_path(
+                cluster_name))
+        if provision_log_path:
+            provision_log = pathlib.Path(provision_log_path).expanduser()
+            if provision_log.is_file():
+                shutil.copy2(provision_log,
+                             os.path.join(cluster_dir, 'provision.log'))
+                logger.debug(
+                    f'Copied provision log for cluster {cluster_name!r}')
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(f'Failed to copy provision log for cluster '
+                       f'{cluster_name}: {e}')
+        errors.append({
+            'component': 'clusters',
+            'resource': f'{cluster_name}/provision_log',
+            'error': str(e),
+            'traceback': _full_traceback()
+        })
+
+    # Get associated requests
+    try:
+        requests = requests_lib.get_request_tasks(
+            requests_lib.RequestTaskFilter(
+                cluster_names=[cluster_name],
+                fields=['request_id', 'name', 'status', 'created_at']))
+        associated_requests = [{
+            'request_id': r.request_id,
+            'name': r.name,
+            'status': r.status.value if r.status else None,
+            'created_at': r.created_at,
+            'created_at_human': debug_dump_helpers.epoch_to_human(r.created_at),
+        } for r in requests]
+
+        assoc_path = os.path.join(cluster_dir, 'associated_requests.json')
+        with open(assoc_path, 'w', encoding='utf-8') as f:
+            json.dump(associated_requests, f, indent=2, default=str)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(f'Failed to get associated requests for cluster '
+                       f'{cluster_name}: {e}')
+        errors.append({
+            'component': 'clusters',
+            'resource': f'{cluster_name}/associated_requests',
+            'error': str(e),
+            'traceback': _full_traceback()
+        })
+
+    # Live cluster record for the skylet-log and Kubernetes sections
+    # below. None for terminated clusters, which have no reachable
+    # node or handle (their history/events were dumped above).
+    cluster_record = None
+    try:
+        cluster_record = global_user_state.get_cluster_from_name(cluster_name)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(f'Failed to get cluster record for '
+                       f'{cluster_name}: {e}')
+        errors.append({
+            'component': 'clusters',
+            'resource': f'{cluster_name}/cluster_record',
+            'error': str(e),
+            'traceback': _full_traceback()
+        })
+
+    # Pull the skylet log from the head node. We attempt this for both UP
+    # and INIT clusters: an INIT cluster may be degraded (failed setup,
+    # partial provisioning) but still have a reachable node with a skylet
+    # log, which is exactly when the log is most useful. The only status we
+    # skip is STOPPED, which has no reachable node. A not-yet-provisioned
+    # cluster simply fails the rsync, which is handled best-effort.
+    status = cluster_record.get('status') if cluster_record else None
+    handle = cluster_record.get('handle') if cluster_record else None
+
+    if status != status_lib.ClusterStatus.STOPPED and handle is not None:
+        # For a Kubernetes cluster, skylet collection runs `kubectl exec`,
+        # whose connect_timeout maps to `--pod-running-timeout` and does NOT
+        # bound the API connect/TLS/discovery phase -- so against a defunct
+        # context it falls back to client-go defaults and hangs ~2min (see
+        # _resolve_remote_skylet_log_path). Gate it on a bounded, no-retry
+        # reachability probe (the same fast-fail signal #9937 added) so a dead
+        # context costs ~API_TIMEOUT instead of ~2min. Non-k8s clusters have no
+        # kube coordinates and skip the probe -- their SSH connect_timeout is a
+        # real TCP deadline, so they already fail fast.
+        skip_skylet = False
+        try:
+            coords = _kube_coordinates_for_handle(handle)
+        except Exception as e:  # pylint: disable=broad-except
+            # Couldn't resolve coordinates; fall through and let skylet
+            # collection record its own best-effort failure.
+            logger.debug(f'Could not resolve kube coordinates for cluster '
+                         f'{cluster_name!r}; skipping reachability gate: {e}')
+            coords = None
+        if coords is not None:
+            context, _ = coords
+            if not reachability.is_reachable(context):
+                logger.debug(f'Skipping skylet log for cluster '
+                             f'{cluster_name!r}: kube context {context!r} is '
+                             f'unreachable (fast-fail).')
+                skip_skylet = True
+        if not skip_skylet:
+            _collect_cluster_skylet_log(cluster_name, cluster_dir, handle,
+                                        errors, status)
+    else:
+        logger.debug(f'Skipping skylet log for cluster {cluster_name!r} '
+                     f'(status={status})')
+
+    # For Kubernetes clusters, also snapshot the related k8s objects (pods,
+    # events, Services, Kueue Workload, ...). Gated only on having a handle,
+    # not on status: these come from the kube API server, so they're
+    # reachable -- and most useful -- even when the cluster isn't UP. This path
+    # already fast-fails on a defunct context (the first list call is a
+    # no-retry, bounded probe; see kubernetes_debug._dump_pods).
+    if handle is not None:
+        _collect_cluster_kubernetes_resources(cluster_name, cluster_dir, handle,
+                                              errors)
+
+    return errors
+
+
 def _dump_cluster_info(cluster_names: Set[str],
                        dump_dir: str,
                        errors: Optional[List[Dict[str, str]]] = None) -> None:
-    """Collect cluster state and events."""
+    """Collect cluster state and events.
+
+    Clusters are dumped in parallel: each cluster's collection can make slow
+    network calls (skylet-log rsync, kube API reads), so a sequential loop let
+    a single unreachable cluster stack its timeout in front of every other
+    cluster. run_in_parallel keeps per-cluster best-effort isolation -- each
+    worker returns its own error records, merged here after all finish.
+    """
     if not cluster_names:
         logger.debug('No clusters to dump')
         return
@@ -1275,130 +1475,17 @@ def _dump_cluster_info(cluster_names: Set[str],
     clusters_dir = os.path.join(dump_dir, 'clusters')
     os.makedirs(clusters_dir, exist_ok=True)
 
-    for cluster_name in cluster_names:
-        cluster_dir = os.path.join(clusters_dir, cluster_name)
-        os.makedirs(cluster_dir, exist_ok=True)
+    reachability = _ContextReachabilityCache()
+    cluster_list = list(cluster_names)
+    num_threads = min(len(cluster_list),
+                      subprocess_utils.get_parallel_threads())
+    results = subprocess_utils.run_in_parallel(
+        lambda name: _dump_one_cluster(name, clusters_dir, reachability),
+        cluster_list, num_threads)
 
-        # Get cluster info, history, and events. Cluster history and
-        # events outlive the cluster row, so terminated clusters still
-        # produce data here.
-        try:
-            dump_data = debug_dump_helpers.get_cluster_dump_data(cluster_name)
-            for filename, content in dump_data:
-                file_path = os.path.join(cluster_dir, filename)
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(content, f, indent=2, default=str)
-            if dump_data:
-                logger.debug(f'Dumped cluster {cluster_name!r} '
-                             f'({len(dump_data)} files)')
-            else:
-                logger.debug(f'Cluster {cluster_name!r} not found in DB or '
-                             f'cluster history')
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(f'Failed to get info for cluster '
-                           f'{cluster_name}: {e}')
-            if errors is not None:
-                errors.append({
-                    'component': 'clusters',
-                    'resource': cluster_name,
-                    'error': str(e),
-                    'traceback': _full_traceback()
-                })
-
-        # Copy the provision log if available. The path is recorded in
-        # cluster history, so this also works for terminated clusters.
-        try:
-            provision_log_path = (
-                global_user_state.get_cluster_history_provision_log_path(
-                    cluster_name))
-            if provision_log_path:
-                provision_log = pathlib.Path(provision_log_path).expanduser()
-                if provision_log.is_file():
-                    shutil.copy2(provision_log,
-                                 os.path.join(cluster_dir, 'provision.log'))
-                    logger.debug(
-                        f'Copied provision log for cluster {cluster_name!r}')
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(f'Failed to copy provision log for cluster '
-                           f'{cluster_name}: {e}')
-            if errors is not None:
-                errors.append({
-                    'component': 'clusters',
-                    'resource': f'{cluster_name}/provision_log',
-                    'error': str(e),
-                    'traceback': _full_traceback()
-                })
-
-        # Get associated requests
-        try:
-            requests = requests_lib.get_request_tasks(
-                requests_lib.RequestTaskFilter(
-                    cluster_names=[cluster_name],
-                    fields=['request_id', 'name', 'status', 'created_at']))
-            associated_requests = [{
-                'request_id': r.request_id,
-                'name': r.name,
-                'status': r.status.value if r.status else None,
-                'created_at': r.created_at,
-                'created_at_human': debug_dump_helpers.epoch_to_human(
-                    r.created_at),
-            } for r in requests]
-
-            assoc_path = os.path.join(cluster_dir, 'associated_requests.json')
-            with open(assoc_path, 'w', encoding='utf-8') as f:
-                json.dump(associated_requests, f, indent=2, default=str)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(f'Failed to get associated requests for cluster '
-                           f'{cluster_name}: {e}')
-            if errors is not None:
-                errors.append({
-                    'component': 'clusters',
-                    'resource': f'{cluster_name}/associated_requests',
-                    'error': str(e),
-                    'traceback': _full_traceback()
-                })
-
-        # Live cluster record for the skylet-log and Kubernetes sections
-        # below. None for terminated clusters, which have no reachable
-        # node or handle (their history/events were dumped above).
-        cluster_record = None
-        try:
-            cluster_record = global_user_state.get_cluster_from_name(
-                cluster_name)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(f'Failed to get cluster record for '
-                           f'{cluster_name}: {e}')
-            if errors is not None:
-                errors.append({
-                    'component': 'clusters',
-                    'resource': f'{cluster_name}/cluster_record',
-                    'error': str(e),
-                    'traceback': _full_traceback()
-                })
-
-        # Pull the skylet log from the head node. We attempt this for both UP
-        # and INIT clusters: an INIT cluster may be degraded (failed setup,
-        # partial provisioning) but still have a reachable node with a skylet
-        # log, which is exactly when the log is most useful. The only status we
-        # skip is STOPPED, which has no reachable node. A not-yet-provisioned
-        # cluster simply fails the rsync, which is handled best-effort.
-        status = cluster_record.get('status') if cluster_record else None
-        handle = cluster_record.get('handle') if cluster_record else None
-
-        if status != status_lib.ClusterStatus.STOPPED and handle is not None:
-            _collect_cluster_skylet_log(cluster_name, cluster_dir, handle,
-                                        errors, status)
-        else:
-            logger.debug(f'Skipping skylet log for cluster {cluster_name!r} '
-                         f'(status={status})')
-
-        # For Kubernetes clusters, also snapshot the related k8s objects (pods,
-        # events, Services, Kueue Workload, ...). Gated only on having a handle,
-        # not on status: these come from the kube API server, so they're
-        # reachable -- and most useful -- even when the cluster isn't UP.
-        if handle is not None:
-            _collect_cluster_kubernetes_resources(cluster_name, cluster_dir,
-                                                  handle, errors)
+    if errors is not None:
+        for cluster_errors in results:
+            errors.extend(cluster_errors)
 
     logger.debug('Exiting _dump_cluster_info')
 

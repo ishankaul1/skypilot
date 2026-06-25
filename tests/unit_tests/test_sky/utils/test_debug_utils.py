@@ -3150,6 +3150,114 @@ class TestDumpClusterInfo:
         runner.rsync.assert_called_once()
         assert not errors
 
+    @mock.patch('sky.utils.debug_utils.kubernetes_debug.context_reachable',
+                return_value=False)
+    @mock.patch('sky.utils.debug_utils._kube_coordinates_for_handle',
+                return_value=('defunct-ctx', 'ns'))
+    @mock.patch('sky.utils.debug_utils.requests_lib.get_request_tasks',
+                return_value=[])
+    @mock.patch('sky.utils.debug_utils.debug_dump_helpers'
+                '.get_cluster_events_data',
+                return_value=[])
+    @mock.patch('sky.utils.debug_utils.global_user_state'
+                '.get_cluster_from_name')
+    def test_unreachable_kube_context_skips_skylet_log(
+            self, mock_get_cluster, mock_events, mock_requests, mock_coords,
+            mock_reachable, tmp_path):
+        """A k8s cluster on a defunct context must NOT attempt the (would-hang)
+        skylet collection -- it's gated on the bounded reachability probe."""
+        del mock_events, mock_requests, mock_coords  # required by mock.patch
+        handle = mock.Mock()
+        runner = mock.Mock()
+        handle.get_command_runners.return_value = [runner]
+        mock_get_cluster.return_value = {
+            'name': 'k8s-dead',
+            'cluster_hash': 'abc',
+            'status': status_lib.ClusterStatus.UP,
+            'handle': handle,
+        }
+
+        errors: List[Dict[str, str]] = []
+        with mock.patch('sky.utils.debug_utils._collect_cluster_kubernetes'
+                        '_resources'):
+            debug_utils._dump_cluster_info({'k8s-dead'}, str(tmp_path), errors)
+
+        mock_reachable.assert_called_once_with('defunct-ctx')
+        # Skylet collection was skipped: the head runner's remote command (the
+        # ~2min-hang path) was never invoked.
+        runner.run.assert_not_called()
+        runner.rsync.assert_not_called()
+
+    @mock.patch('sky.utils.debug_utils.kubernetes_debug.context_reachable',
+                return_value=True)
+    @mock.patch('sky.utils.debug_utils._kube_coordinates_for_handle',
+                return_value=('live-ctx', 'ns'))
+    @mock.patch('sky.utils.debug_utils.requests_lib.get_request_tasks',
+                return_value=[])
+    @mock.patch('sky.utils.debug_utils.debug_dump_helpers'
+                '.get_cluster_events_data',
+                return_value=[])
+    @mock.patch('sky.utils.debug_utils.global_user_state'
+                '.get_cluster_from_name')
+    def test_reachable_kube_context_collects_skylet_log(
+            self, mock_get_cluster, mock_events, mock_requests, mock_coords,
+            mock_reachable, tmp_path):
+        """A k8s cluster on a reachable context still collects the skylet log."""
+        del mock_events, mock_requests, mock_coords  # required by mock.patch
+        handle = mock.Mock()
+        runner = mock.Mock()
+        runner.run.return_value = (0, '/home/sky/.sky/skylet.log\n', '')
+        handle.get_command_runners.return_value = [runner]
+        mock_get_cluster.return_value = {
+            'name': 'k8s-live',
+            'cluster_hash': 'abc',
+            'status': status_lib.ClusterStatus.UP,
+            'handle': handle,
+        }
+
+        errors: List[Dict[str, str]] = []
+        with mock.patch('sky.utils.debug_utils._collect_cluster_kubernetes'
+                        '_resources'):
+            debug_utils._dump_cluster_info({'k8s-live'}, str(tmp_path), errors)
+
+        mock_reachable.assert_called_once_with('live-ctx')
+        runner.rsync.assert_called_once()
+
+
+class TestContextReachabilityCache:
+    """Tests for _ContextReachabilityCache (per-dump memoized kube probes)."""
+
+    @mock.patch('sky.utils.debug_utils.kubernetes_debug.context_reachable')
+    def test_probes_each_context_once(self, mock_reachable):
+        """Repeated lookups of the same context probe only once."""
+        mock_reachable.return_value = True
+        cache = debug_utils._ContextReachabilityCache()
+
+        assert cache.is_reachable('ctx-a') is True
+        assert cache.is_reachable('ctx-a') is True
+        assert cache.is_reachable('ctx-a') is True
+        mock_reachable.assert_called_once_with('ctx-a')
+
+    @mock.patch('sky.utils.debug_utils.kubernetes_debug.context_reachable')
+    def test_distinct_contexts_probed_separately(self, mock_reachable):
+        mock_reachable.side_effect = lambda ctx: ctx == 'live'
+        cache = debug_utils._ContextReachabilityCache()
+
+        assert cache.is_reachable('live') is True
+        assert cache.is_reachable('dead') is False
+        assert cache.is_reachable('live') is True
+        assert mock_reachable.call_count == 2
+
+    @mock.patch('sky.utils.debug_utils.kubernetes_debug.context_reachable',
+                return_value=True)
+    def test_none_in_cluster_context_is_cached(self, mock_reachable):
+        """None (in-cluster auth) is a valid, cacheable key."""
+        cache = debug_utils._ContextReachabilityCache()
+
+        assert cache.is_reachable(None) is True
+        assert cache.is_reachable(None) is True
+        mock_reachable.assert_called_once_with(None)
+
 
 class TestDumpRequestIdInfoLogCollection:
     """_dump_request_id_info collects logs via the LogProvider."""
