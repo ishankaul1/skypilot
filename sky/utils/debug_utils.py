@@ -918,16 +918,16 @@ def _kube_coordinates_for_handle(
         return None
 
     runners = handle.get_command_runners()
-    # Typed as Any (like ``handle``/``runners``): the runner's k8s coordinates
-    # are assigned via nested tuple-unpacking in KubernetesCommandRunner, which
-    # mypy can't see across this module's skipped import.
     k8s_runners: List[Any] = [
         r for r in runners
         if isinstance(r, command_runner.KubernetesCommandRunner)
     ]
     if not k8s_runners:
         return None
-    return k8s_runners[0].context, k8s_runners[0].namespace
+    runner = k8s_runners[0]
+    assert isinstance(runner, command_runner.KubernetesCommandRunner), runner
+    # .context/.namespace are set via tuple-unpacking mypy can't track.
+    return runner.context, runner.namespace  # type: ignore[attr-defined]
 
 
 def _sanitize_context_name(context: Optional[str]) -> str:
@@ -1508,16 +1508,16 @@ def _build_debug_dump(
     # Dump all sections
     errors = debug_dump_context['errors']
     _dump_server_info(dump_dir, errors=errors)
+    # Cluster-wide k8s objects (GPU-metrics pods, Kueue quota config), fetched
+    # once per allowed kube context (source of truth: existing_allowed_contexts,
+    # so a context with no SkyPilot clusters is still captured).
+    _dump_kube_contexts_info(dump_dir, errors=errors)
     _dump_request_id_info(debug_dump_context['request_ids'],
                           dump_dir,
                           errors=errors)
     _dump_cluster_info(debug_dump_context['cluster_names'],
                        dump_dir,
                        errors=errors)
-    # Cluster-wide k8s objects (GPU-metrics pods, Kueue quota config), fetched
-    # once per allowed kube context (source of truth: existing_allowed_contexts,
-    # so a context with no SkyPilot clusters is still captured).
-    _dump_kube_contexts_info(dump_dir, errors=errors)
     _dump_managed_job_info(debug_dump_context['managed_job_ids'],
                            dump_dir,
                            errors=errors)
