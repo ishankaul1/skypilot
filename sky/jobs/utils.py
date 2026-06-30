@@ -1201,6 +1201,17 @@ def _collect_controller_submit_log_paths(file_paths: List[Dict[str, str]],
     pins leaked controllers to a specific submission -- and is not
     reconstructable from the per-job ``<jobid>.log`` or ``job_info``.
 
+    Consolidation mode only: ``submit-job-*.log`` is written solely by
+    ``_consolidated_launch``. In non-consolidation mode the submission runs as a
+    Ray job on the controller cluster and its output goes to
+    ``~/sky_logs/managed_jobs/job-id-<N>/controller.log`` (what ``sky jobs logs
+    --controller`` downloads), which this path does not collect -- so the glob
+    below simply finds nothing. The over-count signal is not lost, though:
+    ``maybe_start_controllers`` also runs in the controller skylet's
+    reconciliation loop, logging "Started N controllers" to the controller
+    cluster's ``skylet.log``, which the dump already collects.
+    TODO(ishankaul1): also collect controller.log for non-consolidation mode.
+
     Scoped to ``job_ids``: we list ``submit-job-*.log`` but only collect
     submissions whose id-set intersects the requested jobs. Unlike
     _collect_controller_system_log_paths -- which builds exact
