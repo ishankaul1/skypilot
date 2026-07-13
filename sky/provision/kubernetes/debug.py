@@ -377,7 +377,7 @@ def _redact_container_env(pod_dict: Dict[str, Any]) -> None:
     ``value`` -- operators can and do pass credentials as plain env values,
     and no name-based blocklist can enumerate theirs.
     """
-    spec = pod_dict.get('spec', {})
+    spec = pod_dict.get('spec') or {}
     for section in ('initContainers', 'containers', 'ephemeralContainers'):
         for container in spec.get(section) or []:
             for env_var in container.get('env') or []:
