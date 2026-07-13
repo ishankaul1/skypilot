@@ -323,7 +323,8 @@ def dump_api_server_pod(namespace: str, pod_name: str,
         pod_dict = _strip_managed_fields(
             api_client.sanitize_for_serialization(pod))
         _redact_container_env(pod_dict)
-        annotations = pod_dict.get('metadata', {}).get('annotations')
+        metadata = pod_dict.get('metadata') or {}
+        annotations = metadata.get('annotations')
         if annotations and _LAST_APPLIED_ANNOTATION in annotations:
             # The last-applied manifest embeds the full pod spec -- including
             # the env values redacted above -- verbatim.
