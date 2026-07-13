@@ -3277,9 +3277,9 @@ class TestDumpClusterInfo:
         errors: List[Dict[str, str]] = []
         with mock.patch('sky.utils.debug_utils._collect_cluster_kubernetes'
                         '_resources'):
-            debug_utils._dump_cluster_info(
-                {'k8s-dead'}, str(tmp_path),
-                debug_utils._kube_context_reachable, errors)
+            debug_utils._dump_cluster_info({'k8s-dead'}, str(tmp_path),
+                                           debug_utils._kube_context_reachable,
+                                           errors)
 
         mock_reachable.assert_called_once_with('defunct-ctx')
         # Skylet collection was skipped: the head runner's remote command (the
@@ -3301,7 +3301,7 @@ class TestDumpClusterInfo:
     def test_reachable_kube_context_collects_skylet_log(
             self, mock_get_cluster, mock_events, mock_requests, mock_coords,
             mock_reachable, tmp_path):
-        """A k8s cluster on a reachable context still collects the skylet log."""
+        """Reachable k8s context still collects the skylet log."""
         del mock_events, mock_requests, mock_coords  # required by mock.patch
         handle = mock.Mock()
         runner = mock.Mock()
@@ -3317,9 +3317,9 @@ class TestDumpClusterInfo:
         errors: List[Dict[str, str]] = []
         with mock.patch('sky.utils.debug_utils._collect_cluster_kubernetes'
                         '_resources'):
-            debug_utils._dump_cluster_info(
-                {'k8s-live'}, str(tmp_path),
-                debug_utils._kube_context_reachable, errors)
+            debug_utils._dump_cluster_info({'k8s-live'}, str(tmp_path),
+                                           debug_utils._kube_context_reachable,
+                                           errors)
 
         mock_reachable.assert_called_once_with('live-ctx')
         runner.rsync.assert_called_once()
@@ -3617,11 +3617,12 @@ class TestJobsControllerUnreachableGate:
             e['resource'] == 'managed_job_details' and 'fast-fail' in e['error']
             for e in ctx['errors'])
 
+
 class TestCollectClusterSkyletLog:
     """Tests for the _collect_cluster_skylet_log helper."""
 
     def test_rsyncs_skylet_log_from_head(self, tmp_path):
-        """Pulls the remotely-resolved skylet log off the first (head) runner."""
+        """Pulls the remotely-resolved skylet log off the head runner."""
         runner = mock.Mock()
         runner.run.return_value = (0, '/home/sky/.sky/skylet.log\n', '')
         handle = mock.Mock()

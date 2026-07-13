@@ -605,9 +605,11 @@ def _get_clusters_from_managed_jobs(
     debug_dump_context['cluster_names'].add(common.JOB_CONTROLLER_NAME)
 
 
-def _populate_recent_context(debug_dump_context: DebugDumpContext,
-                             minutes: float,
-                             reachability: '_KubeContextReachabilityChecker') -> None:
+def _populate_recent_context(
+    debug_dump_context: DebugDumpContext,
+    minutes: float,
+    reachability: '_KubeContextReachabilityChecker',
+) -> None:
     """Populate context with resources active within the given time window."""
     logger.debug(
         f'Populating context with resources from last {minutes} minutes')

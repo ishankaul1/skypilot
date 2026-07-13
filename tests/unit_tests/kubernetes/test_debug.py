@@ -356,7 +356,7 @@ def test_context_prometheus_log_failure_is_recorded(tmp_path, k8s_apis):
     errors = _run_context(tmp_path)
 
     resources = {e['resource'] for e in errors}
-    assert ('gpu_metrics/skypilot-prometheus-server-abc123.log' in resources)
+    assert 'gpu_metrics/skypilot-prometheus-server-abc123.log' in resources
 
 
 def test_context_prometheus_logs_dedupes_identical_previous(tmp_path, k8s_apis):
