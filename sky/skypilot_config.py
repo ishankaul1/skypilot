@@ -1074,10 +1074,7 @@ def register_config_save_validator(
 # Post-save hooks invoked at the end of `update_api_server_config_no_lock`,
 # after the new config has been persisted and reloaded in-process. Unlike
 # `register_config_update_hook`, each hook receives the previously persisted
-# config, the newly persisted config, and the user who made the change, so
-# server-side integrations can record config history or audit trails.
-# Registered at server startup during single-threaded plugin loading, so no
-# lock is needed.
+# config, the newly persisted config, and the user who made the change.
 ConfigPostSaveHook = Callable[
     [config_utils.Config, config_utils.Config, Optional['models.User']], None]
 _CONFIG_POST_SAVE_HOOKS: List[ConfigPostSaveHook] = []
@@ -1385,12 +1382,12 @@ def update_api_server_config_no_lock(config: config_utils.Config) -> None:
         assert old_config is not None
         user = common_utils.get_current_user()
         # At this point `config` reflects what was persisted (e.g. with the
-        # ('db',) key stripped); hand hooks a copy so mutations by one hook
-        # cannot leak into another.
-        saved_config = copy.deepcopy(config)
+        # ('db',) key stripped); hand each hook its own copies so mutations
+        # by one hook cannot leak into another.
         for post_save_hook in list(_CONFIG_POST_SAVE_HOOKS):
             try:
-                post_save_hook(old_config, saved_config, user)
+                post_save_hook(copy.deepcopy(old_config), copy.deepcopy(config),
+                               user)
             except Exception as e:  # pylint: disable=broad-except
                 logger.warning(
                     f'Config post-save hook {post_save_hook!r} raised: {e}',

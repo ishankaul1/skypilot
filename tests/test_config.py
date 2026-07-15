@@ -1118,16 +1118,27 @@ def test_config_post_save_hook(monkeypatch, tmp_path):
     assert seen_user is not None
     assert seen_user.id
 
-    # Hooks receive copies: mutating them does not affect the loaded config.
+    # Each hook receives its own copies: mutating them affects neither the
+    # loaded config nor the configs seen by subsequent hooks.
+    observed = []
+
     def mutating_hook(old, new, user):
-        del old, user
+        del user
+        old.set_nested(('aws', 'labels', 'mutated_old'), 'yes')
         new.set_nested(('aws', 'labels', 'mutated'), 'yes')
+
+    def observing_hook(old, new, user):
+        del user
+        observed.append((old.get_nested(('aws', 'labels', 'mutated_old'), None),
+                         new.get_nested(('aws', 'labels', 'mutated'), None)))
 
     monkeypatch.setattr(skypilot_config, '_CONFIG_POST_SAVE_HOOKS', [])
     skypilot_config.register_config_post_save_hook(mutating_hook)
+    skypilot_config.register_config_post_save_hook(observing_hook)
     skypilot_config.update_api_server_config_no_lock(new_config)
     assert skypilot_config.get_nested(
         ('aws', 'labels', 'mutated'), None) is None
+    assert observed == [(None, None)]
 
     # Registration is idempotent.
     skypilot_config.register_config_post_save_hook(mutating_hook)
