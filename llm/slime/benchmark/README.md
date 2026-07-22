@@ -1,7 +1,7 @@
 # Benchmark data
 
 `metrics.json` holds the load-bearing numbers behind the **Scaling the inference
-fleet** section of the [top-level README](../README.md) — the raw metrics we
+fleet** section of the top-level README — the raw metrics we
 extracted from the run logs, so the tables there are auditable.
 
 Six runs: **1 / 2 / 3 SGLang engines × sync / async**, Qwen3-14B, GRPO,

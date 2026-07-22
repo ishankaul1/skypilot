@@ -18,7 +18,7 @@ on different GPUs (e.g. cheaper hardware for inference) via `resources.accelerat
 
 ## Architecture
 
-![Architecture](images/architecture.svg)
+![Architecture](https://raw.githubusercontent.com/skypilot-org/skypilot/master/llm/slime/images/architecture.svg)
 
 The **trainer cluster** runs the `RolloutManager` (agent rollouts + router) on CPU and
 the **trainer** (Megatron, GRPO) on GPU; each **inference cluster** serves one SGLang
@@ -137,7 +137,7 @@ We used Job Groups to scale inference engines, and tracked the effect on end-to-
 
 Step time falls drastically with increased inference throughput by scaling engines from 1 → 3 (**1200 → 661 s (≈1.8×)** in async mode). Sync mode runs rollouts and training sequentially on every step, so total step time speedups are less pronounced than the rollout throughput gains. At 3 engines, the queue is empty for most of the run, and peak queue depth is far lower (4 sync / 9 async).
 
-*Numbers vary per run. Extracted metrics from all six runs are in [`benchmark/metrics.json`](benchmark/metrics.json).*
+*Numbers vary per run. Extracted metrics from all six runs are in [`benchmark/metrics.json`](https://github.com/skypilot-org/skypilot/blob/master/llm/slime/benchmark/metrics.json).*
 
 ## Components
 
