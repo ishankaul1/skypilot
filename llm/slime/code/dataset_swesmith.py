@@ -57,7 +57,7 @@ def _pool_name(repo: str, suffix: str = "") -> str:
         # Server caps the pool/template name at 58 chars (RFC1123 63 - len("-pool"),
         # see sandbox/core.py) — NOT 63. Reserve room for the suffix so the
         # run-unique part is NEVER truncated (else two runs' pools could collide).
-        base = base[: 58 - len(suf) - 1].strip("-") + "-" + suf
+        base = base[:58 - len(suf) - 1].strip("-") + "-" + suf
     return base[:58].strip("-")
 
 
@@ -106,14 +106,16 @@ def row_to_sample(row: dict, pool_suffix: str = "") -> dict:
             # per-repo image. `git checkout <instance_id>` reaches the buggy state
             # (bug present, hidden tests removed — agent works blind to tests).
             "setup_cmd": f"git -C {WORKDIR} checkout -f {instance_id}",
-            "files": {},  # repo pre-baked in the image; nothing to stage pre-loop
+            "files": {
+            },  # repo pre-baked in the image; nothing to stage pre-loop
             # Host-parsed grading: generate.py reapplies the
             # agent's fix onto HEAD~1 (tests present), runs test_cmd, parses via
             # swesmith log_parser. No in-sandbox grader.
             "eval_kind": "swesmith",
             "test_cmd": _test_cmd_for(inst),
             "swesmith_inst": inst,
-            "gold_patch": row.get("patch", ""),  # golden-patch harness self-check (smoke)
+            "gold_patch": row.get(
+                "patch", ""),  # golden-patch harness self-check (smoke)
         },
     }
 
@@ -130,15 +132,25 @@ def emit_pools(rows: list[dict]) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True, help="output JSONL path")
-    ap.add_argument("--pools-out", help="optional: write distinct (pool,image) JSON here")
+    ap.add_argument("--pools-out",
+                    help="optional: write distinct (pool,image) JSON here")
     ap.add_argument("--dataset", default="SWE-bench/SWE-smith")
     ap.add_argument("--split", default="train")
-    ap.add_argument("--repos", nargs="*", default=None,
+    ap.add_argument("--repos",
+                    nargs="*",
+                    default=None,
                     help="subset to these repos (owner/name); default = all")
-    ap.add_argument("--per-repo", type=int, default=0, help="cap instances per repo (0 = all)")
+    ap.add_argument("--per-repo",
+                    type=int,
+                    default=0,
+                    help="cap instances per repo (0 = all)")
     ap.add_argument("--limit", type=int, default=0, help="global cap (0 = all)")
-    ap.add_argument("--pool-suffix", default="",
-                    help="run-unique token appended to pool names → each run owns+cleans its own pool")
+    ap.add_argument(
+        "--pool-suffix",
+        default="",
+        help=
+        "run-unique token appended to pool names → each run owns+cleans its own pool"
+    )
     args = ap.parse_args()
 
     from datasets import load_dataset  # deferred: heavy import
@@ -169,8 +181,8 @@ def main() -> None:
     if args.pools_out:
         with open(args.pools_out, "w", encoding="utf-8") as f:
             json.dump(pools, f)
-    print(f"wrote {len(rows)} samples to {args.out}; {len(pools)} pools: "
-          + ", ".join(p["pool"] for p in pools))
+    print(f"wrote {len(rows)} samples to {args.out}; {len(pools)} pools: " +
+          ", ".join(p["pool"] for p in pools))
 
 
 if __name__ == "__main__":

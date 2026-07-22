@@ -40,25 +40,24 @@ import time
 import traceback
 from typing import Any
 
-os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")  # upstream knob: no banner per Ray worker
+os.environ.setdefault("MSWEA_SILENT_STARTUP",
+                      "1")  # upstream knob: no banner per Ray worker
 
-import yaml
 from minisweagent import package_dir as _miniswe_package_dir
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.exceptions import Submitted
 from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
-
+import sandbox_env
 from slime.agent.adapters import OpenAIAdapter
-from slime.agent.aiohttp_threaded import FilteredAccessLogger, run_app_in_thread
+from slime.agent.aiohttp_threaded import FilteredAccessLogger
+from slime.agent.aiohttp_threaded import run_app_in_thread
 from slime.utils.misc import SingletonMeta
 from slime.utils.processing_utils import load_tokenizer
 from slime.utils.types import Sample
-
-import sandbox_env
+import yaml
 
 logger = logging.getLogger(__name__)
-
 
 # --- rollout thread pool ------------------------------------------------------
 # Each rollout runs its whole synchronous agent loop (staging, agent.run, eval)
@@ -75,18 +74,20 @@ def _ensure_rollout_executor() -> None:
     global _ROLLOUT_EXECUTOR
     if _ROLLOUT_EXECUTOR is not None:
         return
+
     def _int_env(name, default):  # robust to unset / empty-string / malformed
         try:
             return int(os.environ.get(name) or default)
         except (TypeError, ValueError):
             return default
-    batch = _int_env("GLOBAL_BATCH_SIZE", 0) or (
-        _int_env("ROLLOUT_BATCH_SIZE", 8) * _int_env("N_SAMPLES_PER_PROMPT", 8)
-    )
-    max_workers = max(64, batch + 16)  # one thread per in-flight rollout + headroom
+
+    batch = _int_env("GLOBAL_BATCH_SIZE",
+                     0) or (_int_env("ROLLOUT_BATCH_SIZE", 8) *
+                            _int_env("N_SAMPLES_PER_PROMPT", 8))
+    max_workers = max(64,
+                      batch + 16)  # one thread per in-flight rollout + headroom
     _ROLLOUT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers, thread_name_prefix="rollout"
-    )
+        max_workers=max_workers, thread_name_prefix="rollout")
     asyncio.get_running_loop().set_default_executor(_ROLLOUT_EXECUTOR)
     logger.info(
         "[agent] rollout thread pool: max_workers=%d (default was min(32,cpu+4)); batch=%d",
@@ -94,10 +95,12 @@ def _ensure_rollout_executor() -> None:
         batch,
     )
 
+
 # Upstream config, verbatim (system/instance templates, mswea_bash_command
 # fence, observation template with 10k elision, format-error template).
 # Changing any of it later is a config override, not a fork.
-_MINI_CONFIG = yaml.safe_load((_miniswe_package_dir / "config" / "mini_textbased.yaml").read_text())
+_MINI_CONFIG = yaml.safe_load(
+    (_miniswe_package_dir / "config" / "mini_textbased.yaml").read_text())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -121,11 +124,11 @@ class AgentConfig:
         eval_timeout = int(os.environ.get("AGENT_EVAL_TIMEOUT_SEC", "120"))
         # guard covers worst case: every turn hits the exec timeout, plus eval,
         # plus slack for model latency and sandbox claim.
-        guard = int(os.environ.get("AGENT_ROLLOUT_GUARD_SEC", "0") or 0) or (
-            max_turns * exec_timeout + eval_timeout + 300
-        )
+        guard = int(os.environ.get("AGENT_ROLLOUT_GUARD_SEC", "0") or
+                    0) or (max_turns * exec_timeout + eval_timeout + 300)
         return cls(
-            litellm_model_name=os.environ.get("AGENT_LITELLM_MODEL", "openai/slime-actor"),
+            litellm_model_name=os.environ.get("AGENT_LITELLM_MODEL",
+                                              "openai/slime-actor"),
             max_turns=max_turns,
             exec_timeout_sec=exec_timeout,
             eval_timeout_sec=eval_timeout,
@@ -134,7 +137,9 @@ class AgentConfig:
             # Sit it an hour past the worst-case rollout guard so a slow-tail rollout is
             # never reaped mid-flight — but bounded, so a hard trainer crash doesn't leak
             # boxes for hours and starve the next run's pool.
-            sandbox_lifetime_sec=int(os.environ.get("AGENT_SANDBOX_LIFETIME_SEC", "0") or 0) or (guard + 3600),
+            sandbox_lifetime_sec=int(
+                os.environ.get("AGENT_SANDBOX_LIFETIME_SEC", "0") or 0) or
+            (guard + 3600),
             adapter_port=int(os.environ.get("ADAPTER_PORT", "0")),
             sglang_url=os.environ.get("AGENT_SGLANG_URL") or None,
             default_pool=os.environ.get("AGENT_POOL", "swesmith"),
@@ -155,8 +160,10 @@ class _AdapterService(metaclass=SingletonMeta):
     """
 
     def __init__(self, args) -> None:
-        self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-        self.max_context_len = int(getattr(args, "rollout_max_context_len", 0) or 0)
+        self.tokenizer = load_tokenizer(args.hf_checkpoint,
+                                        trust_remote_code=True)
+        self.max_context_len = int(
+            getattr(args, "rollout_max_context_len", 0) or 0)
         # args.sglang_router_ip/port DOES resolve under
         # --rollout-external-engine-addrs: slime still starts a trainer-local
         # sglang_router and writes its ip/port back onto args
@@ -174,7 +181,8 @@ class _AdapterService(metaclass=SingletonMeta):
             tokenizer=self.tokenizer,
             sglang_url=sglang_url,
             tool_parser=getattr(args, "sglang_tool_call_parser", None) or None,
-            reasoning_parser=getattr(args, "sglang_reasoning_parser", None) or None,
+            reasoning_parser=getattr(args, "sglang_reasoning_parser", None) or
+            None,
         )
         self.app_handle = run_app_in_thread(
             self.adapter.app,
@@ -184,7 +192,10 @@ class _AdapterService(metaclass=SingletonMeta):
             # client disconnect must cancel the handler so the adapter's
             # fire-and-forget /abort_request frees the sglang slot (see the
             # comment in coding_agent_rl/generate.py:151-154).
-            runner_kwargs={"handler_cancellation": True, "access_log_class": FilteredAccessLogger},
+            runner_kwargs={
+                "handler_cancellation": True,
+                "access_log_class": FilteredAccessLogger
+            },
         )
         self.adapter_url = f"http://127.0.0.1:{self.app_handle.port}"
         logger.info(
@@ -223,17 +234,26 @@ def _make_model(adapter_url: str, session_id: str) -> LitellmTextbasedModel:
 
 def _make_env(sb, workdir: str):
     """Environment seam: sandbox-backed, or upstream LocalEnvironment (dev-only)."""
-    env_vars = dict((_MINI_CONFIG.get("environment") or {}).get("env") or {})  # PAGER=cat etc.
+    env_vars = dict((_MINI_CONFIG.get("environment") or {}).get("env") or
+                    {})  # PAGER=cat etc.
     if sb is None:
-        return LocalEnvironment(cwd=workdir, env=env_vars, timeout=CONFIG.exec_timeout_sec)
-    return sandbox_env.SandboxEnvironment(sb, cwd=workdir, env=env_vars, timeout=CONFIG.exec_timeout_sec)
+        return LocalEnvironment(cwd=workdir,
+                                env=env_vars,
+                                timeout=CONFIG.exec_timeout_sec)
+    return sandbox_env.SandboxEnvironment(sb,
+                                          cwd=workdir,
+                                          env=env_vars,
+                                          timeout=CONFIG.exec_timeout_sec)
 
 
 def _make_agent(model, env) -> DefaultAgent:
-    agent_cfg = dict(_MINI_CONFIG.get("agent") or {})  # upstream templates, verbatim
-    agent_cfg.pop("mode", None)  # interactive-CLI knob; not an AgentConfig field
+    agent_cfg = dict(_MINI_CONFIG.get("agent") or
+                     {})  # upstream templates, verbatim
+    agent_cfg.pop("mode",
+                  None)  # interactive-CLI knob; not an AgentConfig field
     agent_cfg["step_limit"] = CONFIG.max_turns
-    agent_cfg["cost_limit"] = 0  # disabled: adapter turns cost $0; step limit + guard cap the run
+    agent_cfg[
+        "cost_limit"] = 0  # disabled: adapter turns cost $0; step limit + guard cap the run
     return DefaultAgent(model, env, **agent_cfg)
 
 
@@ -241,18 +261,26 @@ def _get_metadata(sample: Sample) -> dict[str, Any]:
     """Normalize the dataset row schema (see module docstring)."""
     m = sample.metadata or {}
     return {
-        "instance_id": str(m.get("instance_id") or sample.label or sample.index or "unknown"),
+        "instance_id": str(
+            m.get("instance_id") or sample.label or sample.index or "unknown"),
         "pool": m.get("pool") or CONFIG.default_pool,
-        "image": m.get("image") or None,  # per-repo env image: on-demand creates (no-pool mode / pool-claim fallback)
+        "image":
+            m.get("image") or
+            None,  # per-repo env image: on-demand creates (no-pool mode / pool-claim fallback)
         "workdir": m.get("workdir") or CONFIG.default_workdir,
         "task": m.get("task") or _coerce_prompt(sample.prompt),
         "files": m.get("files") or {},  # staged before the agent loop
-        "setup_cmd": m.get("setup_cmd"),  # optional: run post-claim, pre-agent (SWE-smith buggy-state)
-        "eval_kind": m.get("eval_kind") or "cmd",  # "cmd" (MBPP eval_cmd) | "swesmith" (host-parse)
-        "eval_files": m.get("eval_files") or {},  # staged AFTER the loop (hidden graders)
+        "setup_cmd": m.get(
+            "setup_cmd"
+        ),  # optional: run post-claim, pre-agent (SWE-smith buggy-state)
+        "eval_kind": m.get("eval_kind") or
+                     "cmd",  # "cmd" (MBPP eval_cmd) | "swesmith" (host-parse)
+        "eval_files": m.get("eval_files")
+                      or {},  # staged AFTER the loop (hidden graders)
         "eval_cmd": m.get("eval_cmd"),  # exit 0 == solved (cmd kind)
         "test_cmd": m.get("test_cmd"),  # repo test command (swesmith kind)
-        "swesmith_inst": m.get("swesmith_inst"),  # F2P/P2P/repo for host-side log_parser
+        "swesmith_inst":
+            m.get("swesmith_inst"),  # F2P/P2P/repo for host-side log_parser
     }
 
 
@@ -263,7 +291,8 @@ def _coerce_prompt(prompt) -> str:
         return prompt
     if isinstance(prompt, list):
         for m in prompt:
-            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            if isinstance(m, dict) and m.get("role") == "user" and isinstance(
+                    m.get("content"), str):
                 return m["content"]
     return ""
 
@@ -290,7 +319,8 @@ class _TimedEnv:
         self.inner = inner
         self.exec_seconds = 0.0
         self.exec_count = 0
-        self.exec_durations: list[float] = []  # per-call wall-times (for p50/p95/p99)
+        self.exec_durations: list[float] = [
+        ]  # per-call wall-times (for p50/p95/p99)
 
     def execute(self, *args, **kwargs):
         t = time.perf_counter()
@@ -334,8 +364,7 @@ _SWESMITH_PREP = (
     "set -e; cd {workdir}; "
     "git add -A; git diff --cached HEAD > /tmp/agent.patch || true; "
     "git checkout -f HEAD~1; "
-    "git apply /tmp/agent.patch || git apply --3way /tmp/agent.patch || true"
-)
+    "git apply /tmp/agent.patch || git apply --3way /tmp/agent.patch || true")
 
 
 def _evaluate_swesmith(env, md: dict, timeout_sec: int) -> float:
@@ -348,14 +377,18 @@ def _evaluate_swesmith(env, md: dict, timeout_sec: int) -> float:
     inst = md.get("swesmith_inst") or {}
     test_cmd = md.get("test_cmd")
     if not test_cmd or not inst:
-        logger.warning("[agent] swesmith eval missing test_cmd/inst for %s", md.get("instance_id"))
+        logger.warning("[agent] swesmith eval missing test_cmd/inst for %s",
+                       md.get("instance_id"))
         return 0.0
     f2p = inst.get("FAIL_TO_PASS") or []
     p2p = inst.get("PASS_TO_PASS") or []
     try:
-        prep = env.execute({"command": _SWESMITH_PREP.format(workdir=md["workdir"])}, timeout=180)
+        prep = env.execute(
+            {"command": _SWESMITH_PREP.format(workdir=md["workdir"])},
+            timeout=180)
         if prep.get("returncode") != 0:
-            logger.warning("[agent] swesmith prep rc=%s for %s", prep.get("returncode"), md.get("instance_id"))
+            logger.warning("[agent] swesmith prep rc=%s for %s",
+                           prep.get("returncode"), md.get("instance_id"))
             return 0.0
         out = env.execute({"command": test_cmd}, timeout=timeout_sec)
         # Host-side parse (lazy import: only the trainer has swesmith installed).
@@ -364,16 +397,20 @@ def _evaluate_swesmith(env, md: dict, timeout_sec: int) -> float:
 
         passed = TestStatus.PASSED.value
         status = registry.get_from_inst(inst).log_parser(out.get("output", ""))
-        ok = all(status.get(t) == passed for t in f2p) and all(status.get(t) == passed for t in p2p)
+        ok = all(status.get(t) == passed for t in f2p) and all(
+            status.get(t) == passed for t in p2p)
         return 1.0 if ok else 0.0
     except Exception as e:  # noqa: BLE001 - a bad rollout must never raise out of eval
-        logger.warning("[agent] swesmith eval failed for %s: %s", md.get("instance_id"), e)
+        logger.warning("[agent] swesmith eval failed for %s: %s",
+                       md.get("instance_id"), e)
         return 0.0
 
 
-async def generate(args, sample: Sample, sampling_params: dict[str, Any]) -> list[Sample]:
+async def generate(args, sample: Sample,
+                   sampling_params: dict[str, Any]) -> list[Sample]:
     """Per-sample agent rollout with wall-clock guard (rollout_guard_sec)."""
-    _ensure_rollout_executor()  # size the to_thread pool to the batch (see above)
+    _ensure_rollout_executor(
+    )  # size the to_thread pool to the batch (see above)
     state = _AdapterService(args)
     md = _get_metadata(sample)
     instance_id = md["instance_id"]
@@ -400,13 +437,16 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]) -> lis
                     pool=md["pool"],
                     lifetime_sec=CONFIG.sandbox_lifetime_sec,
                     workdir=md["workdir"],
-                    image=md.get("image"),  # on-demand create: no-pool mode, or pool-claim fallback
+                    image=md.get(
+                        "image"
+                    ),  # on-demand create: no-pool mode, or pool-claim fallback
                 )
                 t_claim = time.perf_counter() - _c
             env_raw = _make_env(sb, md["workdir"])
             env = _TimedEnv(env_raw)  # (d) accumulate per-action exec time
             agent = _make_agent(_make_model(state.adapter_url, session_id), env)
-            await asyncio.to_thread(_stage_files, env_raw, md["files"], md["workdir"])
+            await asyncio.to_thread(_stage_files, env_raw, md["files"],
+                                    md["workdir"])
             # Optional per-task setup run post-claim, pre-agent (e.g. SWE-smith
             # establishing the buggy state in a shared per-repo image). No-op for
             # MBPP (no setup_cmd). Runs via env_raw so it isn't counted as an
@@ -419,8 +459,8 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]) -> lis
                 setup_out: dict = {}
                 for _attempt in range(3):
                     setup_out = await asyncio.to_thread(
-                        env_raw.execute, {"command": md["setup_cmd"]}, timeout=CONFIG.exec_timeout_sec
-                    )
+                        env_raw.execute, {"command": md["setup_cmd"]},
+                        timeout=CONFIG.exec_timeout_sec)
                     if setup_out.get("returncode") == 0:
                         break
                     if _attempt < 2:
@@ -428,10 +468,12 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]) -> lis
                 if setup_out.get("returncode") != 0:
                     logger.warning(
                         "[agent] setup_cmd rc=%s for %s (3 tries): %s",
-                        setup_out.get("returncode"), instance_id,
+                        setup_out.get("returncode"),
+                        instance_id,
                         str(setup_out.get("output", ""))[-300:],
                     )
-                    return _abort_result(sample, "setup_cmd_failed", instance_id)
+                    return _abort_result(sample, "setup_cmd_failed",
+                                         instance_id)
 
             # (b) agent-loop wall time. DefaultAgent.run is sync (model.query +
             # env.execute block), so each in-flight rollout gets a worker thread.
@@ -448,30 +490,38 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]) -> lis
                 # SWE-smith: reapply agent fix onto tests-present commit, run repo
                 # test cmd, parse host-side. No eval_files staged (grading is not
                 # an in-sandbox script). See _evaluate_swesmith.
-                reward = await asyncio.to_thread(_evaluate_swesmith, env_raw, md, CONFIG.eval_timeout_sec)
+                reward = await asyncio.to_thread(_evaluate_swesmith, env_raw,
+                                                 md, CONFIG.eval_timeout_sec)
             else:
                 # MBPP/cmd: stage hidden graders AFTER the loop (policy can't read
                 # or edit them), then run eval_cmd (exit 0 == solved).
-                await asyncio.to_thread(_stage_files, env_raw, md["eval_files"], md["workdir"])
-                reward = await asyncio.to_thread(_evaluate, env_raw, md["eval_cmd"], CONFIG.eval_timeout_sec)
+                await asyncio.to_thread(_stage_files, env_raw, md["eval_files"],
+                                        md["workdir"])
+                reward = await asyncio.to_thread(_evaluate, env_raw,
+                                                 md["eval_cmd"],
+                                                 CONFIG.eval_timeout_sec)
             t_eval = time.perf_counter() - _e
 
             samples = await state.adapter.finish_session(
                 session_id,
                 base_sample=sample,
-                reward=reward,  # split evenly across fan-out samples by the manager
+                reward=
+                reward,  # split evenly across fan-out samples by the manager
             )
             if not samples:
-                return _abort_result(sample, "adapter_session_empty", instance_id)
+                return _abort_result(sample, "adapter_session_empty",
+                                     instance_id)
             # Per-rollout timing rides sample.metadata; rollout_metrics.py dedups
             # by session_id (a fork emits >1 sample, all sharing these numbers).
             timing = {
-                "claim_sec": round(t_claim, 3),  # sandbox CREATE/claim time (one per rollout)
+                "claim_sec": round(
+                    t_claim, 3),  # sandbox CREATE/claim time (one per rollout)
                 "agent_sec": round(t_agent, 3),
                 "eval_sec": round(t_eval, 3),
                 "exec_sec": round(t_exec, 3),
                 "exec_count": n_exec,
-                "exec_calls": list(env.exec_durations),  # per-call exec wall-times (percentiles)
+                "exec_calls": list(env.exec_durations
+                                  ),  # per-call exec wall-times (percentiles)
             }
             for s in samples:
                 # slime's TrajectoryManager.to_sample does NOT propagate
@@ -519,8 +569,10 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]) -> lis
         )
         return _abort_result(sample, "wall_clock_timeout", instance_id)
     except Exception as e:
-        logger.warning("[agent] %s: rollout failed: %s\n%s", instance_id, e, traceback.format_exc())
-        return _abort_result(sample, f"exception:{type(e).__name__}", instance_id)
+        logger.warning("[agent] %s: rollout failed: %s\n%s", instance_id, e,
+                       traceback.format_exc())
+        return _abort_result(sample, f"exception:{type(e).__name__}",
+                             instance_id)
     finally:
         if sb is not None:  # never leak a claimed sandbox
             await sandbox_env.terminate_sandbox(sb)
@@ -537,7 +589,8 @@ def _session_id(sample: Sample, instance_id: str) -> str:
     return f"agent-{instance_id}-{secrets.token_hex(8)}"
 
 
-def _abort_result(sample: Sample, reason: str, instance_id: str) -> list[Sample]:
+def _abort_result(sample: Sample, reason: str,
+                  instance_id: str) -> list[Sample]:
     """Mark ``sample`` aborted in place; verbatim shape from
     slime/examples/coding_agent_rl/generate.py:_abort_result."""
     sample.tokens = [0, 0]

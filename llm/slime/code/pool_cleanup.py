@@ -46,23 +46,29 @@ def main() -> None:
     try:
         boxes = s.ls()
     except Exception as e:
-        print(f"[pool-cleanup] ls() failed: {e}"); boxes = []
+        print(f"[pool-cleanup] ls() failed: {e}")
+        boxes = []
     ok = 0
     for b in boxes:
         rec = getattr(b, "_record", {}) if not isinstance(b, dict) else b
         if rec.get("template_name") in names:
             try:
-                b.terminate(); ok += 1
+                b.terminate()
+                ok += 1
             except Exception:
                 pass
-    print(f"[pool-cleanup] terminated {ok} sandboxes across {len(names)} pool(s)")
+    print(
+        f"[pool-cleanup] terminated {ok} sandboxes across {len(names)} pool(s)")
 
     # 2) delete the pools (now unblocked).
     for name in names:
         try:
-            s.delete_pool(name); print(f"[pool-cleanup] deleted pool: {name}")
+            s.delete_pool(name)
+            print(f"[pool-cleanup] deleted pool: {name}")
         except Exception as e:
-            print(f"[pool-cleanup] delete {name} failed (may retry manually): {str(e)[:80]}")
+            print(
+                f"[pool-cleanup] delete {name} failed (may retry manually): {str(e)[:80]}"
+            )
 
 
 if __name__ == "__main__":

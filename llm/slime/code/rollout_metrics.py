@@ -26,8 +26,8 @@ multi-turn forking appears.
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +81,14 @@ def compute_metrics(samples) -> dict[str, float]:
     group_rewards: dict[int, list[float]] = defaultdict(list)
     for sid, r in session_reward.items():
         group_rewards[session_group.get(sid)].append(r)
-    pass_at_1 = [sum(rs) / len(rs) for rs in group_rewards.values() if rs]  # per-group mean
-    pass_at_k = [1.0 if any(r >= 1.0 for r in rs) else 0.0 for rs in group_rewards.values() if rs]
+    pass_at_1 = [sum(rs) / len(rs) for rs in group_rewards.values() if rs
+                ]  # per-group mean
+    pass_at_k = [
+        1.0 if any(r >= 1.0
+                   for r in rs) else 0.0
+        for rs in group_rewards.values()
+        if rs
+    ]
 
     metrics: dict[str, float] = {}
     if pass_at_1:
@@ -131,18 +137,25 @@ def compute_metrics(samples) -> dict[str, float]:
             metrics[f"sandbox_{key}/{stat}"] = v
     # exec_call = per-CALL exec wall-time, flattened across every action in the step
     # -> per-call percentiles (distinct from exec_sec which is per-rollout total).
-    exec_calls = [d for t in session_timing.values() for d in (t.get("exec_calls") or [])]
+    exec_calls = [
+        d for t in session_timing.values() for d in (t.get("exec_calls") or [])
+    ]
     for stat, v in _reduce([float(d) for d in exec_calls]).items():
         metrics[f"sandbox_exec_call/{stat}"] = v
     metrics["sandbox_exec_call/count"] = float(len(exec_calls))
-    exec_counts = [float(t["exec_count"]) for t in session_timing.values() if "exec_count" in t]
+    exec_counts = [
+        float(t["exec_count"])
+        for t in session_timing.values()
+        if "exec_count" in t
+    ]
     if exec_counts:
         metrics["sandbox_exec_count/mean"] = sum(exec_counts) / len(exec_counts)
     metrics["num_rollouts"] = float(len(session_reward))
     return metrics
 
 
-def log_rollout_metrics(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
+def log_rollout_metrics(rollout_id, args, samples, rollout_extra_metrics,
+                        rollout_time) -> bool:
     """slime custom-rollout-log hook. Returns False so slime's default logging
     still runs (we only add agent/* keys)."""
     try:
@@ -153,13 +166,16 @@ def log_rollout_metrics(rollout_id, args, samples, rollout_extra_metrics, rollou
 
     # Greppable stdout line (works even when wandb is disabled).
     logger.info("[metrics] step=%s %s", rollout_id, metrics)
-    print(f"[metrics] step={rollout_id} " + " ".join(f"{k}={v:.4g}" for k, v in metrics.items()), flush=True)
+    print(f"[metrics] step={rollout_id} " +
+          " ".join(f"{k}={v:.4g}" for k, v in metrics.items()),
+          flush=True)
 
     # Emit to wandb via slime's own logger if enabled (same path as the built-in
     # rollout/perf metrics: logging_utils.log -> wandb.log).
     try:
         from slime.utils import logging_utils
-        from slime.utils.metric_utils import compute_rollout_step, dict_add_prefix
+        from slime.utils.metric_utils import compute_rollout_step
+        from slime.utils.metric_utils import dict_add_prefix
 
         if getattr(args, "use_wandb", False):
             log_dict = dict_add_prefix(metrics, "agent/")
