@@ -13,7 +13,7 @@ A Job Group gives us the pieces to scale slime to larger workloads:
 on different GPUs (e.g. cheaper hardware for inference) via `resources.accelerators`.
 
 > [!NOTE]
-> This example also uses **[SkyPilot Sandboxes](https://docs.skypilot.ai/en/latest/sandboxes.html)**, a feature of [SkyPilot Platform](https://docs.skypilot.ai/en/latest/skypilot-platform.html), to run the agent's untrusted code and grade it for reward.
+> This example also uses **[SkyPilot Sandboxes](https://docs.skypilot.ai/en/latest/sandboxes.html)**, to run the agent's untrusted code and grade it for reward.
 
 
 ## Architecture
