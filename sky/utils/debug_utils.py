@@ -1037,16 +1037,28 @@ def _sanitize_request_body(request) -> Optional[Dict[str, Any]]:
     return data
 
 
-def _dump_request_id_info(request_ids: Set[str],
-                          dump_dir: str,
-                          errors: Optional[List[Dict[str, str]]] = None,
-                          deadline: Optional[float] = None) -> None:
+# Per-log-copy cap. A copy is normally instant, but copy_log_file on a
+# long-running/streaming request (e.g. a status-refresh daemon whose log is
+# still being appended) can block for tens of seconds before returning -- so one
+# such request would otherwise dominate, or under a tight budget hang, the whole
+# section. Clamped further by the overall deadline via _bounded_timeout.
+_REQUEST_LOG_COPY_TIMEOUT = 30
+
+
+def _dump_request_id_info(
+        request_ids: Set[str],
+        dump_dir: str,
+        errors: Optional[List[Dict[str, str]]] = None,
+        deadline: Optional[float] = None,
+        orphans: Optional[List[Dict[str, Any]]] = None) -> None:
     """Collect request logs and metadata.
 
-    ``deadline`` (absolute monotonic) bounds the section: once the budget is
-    gone we stop starting new requests and record the rest as skipped, so the
-    dump still zips what it gathered. Per-request wall-clock is written to
-    ``requests/_timings.json``.
+    ``deadline`` (absolute monotonic) bounds the section two ways: each
+    per-request log copy is capped by ``_bounded_timeout`` (so a single
+    long-running request's still-streaming log can't dominate), and once the
+    budget is gone we stop starting new requests and record the rest as skipped
+    -- so the dump still zips what it gathered. Per-request wall-clock is written
+    to ``requests/_timings.json``.
     """
     if not request_ids:
         logger.debug('No requests to dump')
@@ -1127,14 +1139,22 @@ def _dump_request_id_info(request_ids: Set[str],
 
         # Copy request log file. Routed through the LogProvider so that
         # deployments whose request logs are not on the local filesystem
-        # can fetch them from wherever they live.
+        # can fetch them from wherever they live. Deadline-bounded: a
+        # streaming/active request's copy can block for tens of seconds.
         try:
-            copied = log_provider.get_log_provider().copy_log_file(
-                request_id, log_provider.RequestLogType.REQUEST,
-                pathlib.Path(request_dir) / 'request.log')
-            if copied:
+            ok, copied = _run_with_deadline(
+                lambda rid=request_id, rd=request_dir: log_provider.
+                get_log_provider().copy_log_file(
+                    rid, log_provider.RequestLogType.REQUEST,
+                    pathlib.Path(rd) / 'request.log'),
+                _bounded_timeout(_REQUEST_LOG_COPY_TIMEOUT, deadline),
+                component='requests',
+                resource=f'{request_id}/log',
+                errors=errors,
+                orphans=orphans)
+            if ok and copied:
                 logger.debug(f'Copied request log for {request_id}')
-            else:
+            elif ok:
                 logger.debug(f'Request log not found for {request_id}')
         except Exception as e:  # pylint: disable=broad-except
             logger.warning(f'Failed to copy log for request {request_id}: {e}')
@@ -1147,12 +1167,19 @@ def _dump_request_id_info(request_ids: Set[str],
                 })
 
         # Copy debug log file (only exists when
-        # ENABLE_REQUEST_DEBUG_LOGGING is enabled)
+        # ENABLE_REQUEST_DEBUG_LOGGING is enabled). Deadline-bounded too.
         try:
-            copied = log_provider.get_log_provider().copy_log_file(
-                request_id, log_provider.RequestLogType.DEBUG,
-                pathlib.Path(request_dir) / 'request_debug.log')
-            if copied:
+            ok, copied = _run_with_deadline(
+                lambda rid=request_id, rd=request_dir: log_provider.
+                get_log_provider().copy_log_file(
+                    rid, log_provider.RequestLogType.DEBUG,
+                    pathlib.Path(rd) / 'request_debug.log'),
+                _bounded_timeout(_REQUEST_LOG_COPY_TIMEOUT, deadline),
+                component='requests',
+                resource=f'{request_id}/request_debug.log',
+                errors=errors,
+                orphans=orphans)
+            if ok and copied:
                 logger.debug(f'Copied debug log for {request_id}')
         except Exception as e:  # pylint: disable=broad-except
             logger.warning(
@@ -2268,7 +2295,8 @@ def _build_debug_dump(
          lambda: _dump_request_id_info(debug_dump_context['request_ids'],
                                        dump_dir,
                                        errors=errors,
-                                       deadline=deadline)),
+                                       deadline=deadline,
+                                       orphans=orphans)),
         ('clusters',
          lambda: _dump_cluster_info(debug_dump_context['cluster_names'],
                                     dump_dir,
